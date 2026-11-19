@@ -1,0 +1,10 @@
+# Your own domains for the "general" profiles. One domain per line.
+# Subdomains are matched automatically (example.org also covers a.example.org).
+# Prefix ^ disables automatic subdomain matching for that entry.
+# Prefix ! makes a local exception (the entry is excluded from THIS list).
+# Lines starting with # and empty lines are ignored.
+# This file is yours: updates never touch it.
+#
+# Example:
+# rutracker.org
+# ^example.com

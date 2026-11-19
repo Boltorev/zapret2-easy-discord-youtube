@@ -1,0 +1,5 @@
+{
+  "_comment": "Источники для пункта меню 10 (Обновить списки). Пустая строка = не обновлять. Скачивание только по кнопке и только после подтверждения.",
+  "ipset": "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/ipset-service.txt",
+  "hostlists": ""
+}

@@ -1,0 +1,9 @@
+# Domains that must NEVER be touched by the bypass. One domain per line.
+# Use this when a site breaks with the bypass enabled (banking, corporate VPN, etc).
+# Prefix ^ disables automatic subdomain matching for that entry.
+# Lines starting with # and empty lines are ignored.
+# This file is yours: updates never touch it.
+#
+# Example:
+# sberbank.ru
+# ^mycompany.local

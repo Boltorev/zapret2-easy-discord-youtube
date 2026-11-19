@@ -1,0 +1,36 @@
+# YouTube / Google Video — хостлист для профиля AUTO "yt-tls".
+#
+# Зачем отдельный файл: в list-google.txt от Flowseal домены ggpht.com,
+# googleusercontent.com, gvt1.com, gvt2.com присутствуют только частично
+# (yt3/yt4.ggpht.com, yt3.googleusercontent.com), поэтому часть поддоменов
+# не покрывалась. Здесь они указаны на уровне апекса — поддомены
+# подхватываются автоматически.
+#
+# Поддомены включаются автоматически. Префикс ^ отключает это для записи.
+# Префикс ! делает локальное исключение. Пустые строки и # игнорируются.
+#
+# Этот файл наш. Обновление списков его не трогает.
+
+youtube.com
+youtu.be
+youtube-nocookie.com
+youtubekids.com
+
+googlevideo.com
+gvt1.com
+gvt2.com
+ytimg.com
+ggpht.com
+googleusercontent.com
+
+youtubei.googleapis.com
+youtube.googleapis.com
+youtubeembeddedplayer.googleapis.com
+jnn-pa.googleapis.com
+wide-youtube.l.google.com
+youtube-ui.l.google.com
+yt-video-upload.l.google.com
+ytimg.l.google.com
+
+play.google.com
+www.gstatic.com

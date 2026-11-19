@@ -1,0 +1,245 @@
+[meta]
+name   = AUTO
+title  = Авто (сам меняет стратегию, если сайт не открывается)
+source = собственная разработка сборки Запрет2 Easy
+desc   = 4 независимых домена ротации: YouTube TLS, Discord TLS, общий TLS/HTTP, QUIC
+[args]
+# =====================================================================
+#  AUTO — автоматическая смена стратегий через circular
+#
+#  Идея: circular считает неудачи и меняет стратегию для КОНКРЕТНОГО ХОСТА.
+#  Хранилище состояния: autostate.<key>.<hostkey>, где hostkey с nld=2 —
+#  домен 2-го уровня (все *.googlevideo.com = один хост).
+#  Разные key => полностью независимая ротация: отвал YouTube не трогает Discord.
+#
+#  Порядок инстансов в каждом профиле жёсткий:
+#    --out-range (байты) -> --in-range (байты) -> circular -> --in-range=x
+#    -> --payload -> инстансы strategy=N
+#  circular обязан идти ДО --payload и видеть входящие RST/данные,
+#  иначе детекторы не работают.
+#
+#  Диапазоны в БАЙТАХ, не в пакетах:
+#    -s34228 = maxseq 32768 + 1460 (макс. пейлоад TCP)
+#    -s5556  = inseq  4096  + 1460
+#  Пакетный режим (-d10) отсекает Lua на ~14.6 КБ, и блокировка DPI
+#  на пороге 16 КБ остаётся невидимой для детектора ретрансмиссий.
+# =====================================================================
+
+# --- блобы и библиотеки
+--blob=tls_clienthello_www_google_com:@{ROOT}\fake\tls_clienthello_www_google_com.bin
+--blob=tls_clienthello_4pda_to:@{ROOT}\fake\tls_clienthello_4pda_to.bin
+--blob=quic_initial_www_google_com:@{ROOT}\fake\quic_initial_www_google_com.bin
+--blob=ACTIVE_DISCORD_UDP:@{ROOT}\fake\ACTIVE_DISCORD_UDP.bin
+--lua-init=@{ROOT}\lua\zapret-lib.lua
+--lua-init=@{ROOT}\lua\zapret-antidpi.lua
+--lua-init=@{ROOT}\lua\zapret-auto.lua
+
+# --- перехват в ядре
+# TCP: 443/80 + discord media на нестандартных портах
+--wf-tcp-out=443,80,2053,2083,2087,2096,8443
+# UDP: только голосовые/медиа-диапазоны Discord.
+# Порт 443 сюда НЕ включён умышленно: QUIC ловим сигнатурными фильтрами ниже,
+# чтобы не гнать через процесс весь исходящий UDP 443.
+--wf-udp-out=19294-19344,50000-50100
+# исходящие QUIC Initial — по сигнатуре, а не по порту
+--wf-raw-part=@{ROOT}\bin\windivert.filter\windivert_part.quic_initial_ietf.txt
+# входящие QUIC long header (Initial/Handshake/Retry): нужны детектору udp_in.
+# Short header (видеоданные) в фильтр не попадает: первый байт 0x40..0x7F.
+--wf-raw-part=@{ROOT}\bin\windivert.filter\windivert_part.quic_longheader_in.txt
+
+# =====================================================================
+#  ПРОФИЛЬ 1. YouTube TLS 443.  Домен ротации: yt
+# =====================================================================
+--name=yt-tls
+--filter-tcp=443
+--filter-l7=tls
+--hostlist={ROOT}\lists\list-youtube.txt
+--hostlist-exclude={ROOT}\lists\list-exclude.txt
+--hostlist-exclude={ROOT}\lists\list-exclude-user.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude-user.txt
+--out-range=-s34228
+--in-range=-s5556
+--lua-desync=circular:key=yt:nld=2:fails=4:time=45:retrans=3:maxseq=32768:inseq=4096
+--in-range=x
+
+# --- strategy=1: fake + multisplit с seqovl (из FAKE-TLS-AUTO-ALT2)
+# seqovl не требует "доверия" сервера: он принимает только часть сегмента
+# за счёт sequence numbers. Минимальное вмешательство, первый кандидат.
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tls_mod=rnd,dupsid,sni=www.google.com:repeats=8:tcp_seq=-10000000:ip_id=zero:strategy=1
+--payload=known
+--lua-desync=multisplit:pos=1:seqovl=681:seqovl_pattern=tls_clienthello_www_google_com:ip_id=zero:strategy=1
+
+# --- strategy=2: hostfakesplit (из ALT9)
+# подмена имени хоста в пакете, 4 фейка, фулинг по TCP timestamp
+--payload=known
+--lua-desync=hostfakesplit:host=www.google.com:repeats=4:tcp_ts=-1000:ip_id=zero:strategy=2
+
+# --- strategy=3: fake + fakedsplit (из ALT1)
+# 6 прямых фейков + разрезание с вставными фейками
+--payload=tls_client_hello
+--lua-desync=fake:blob=tls_clienthello_www_google_com:repeats=6:tcp_ts=-1000:ip_id=zero:strategy=3
+--payload=known
+--lua-desync=fakedsplit:pos=2:pattern=0x00:tcp_ts=-1000:ip_id=zero:strategy=3
+
+# --- strategy=4 (final): fake-набор + multidisorder (из FAKE-TLS-AUTO)
+# 22 фейка, подмена SNI на www.google.com, копирование session id,
+# сегменты в обратном порядке. Самая широкая атака -> последний рубеж.
+--payload=tls_client_hello
+--lua-desync=fake:blob=0x00000000:repeats=11:tcp_seq=-10000:ip_id=zero:strategy=4
+--lua-desync=fake:blob=fake_default_tls:tls_mod=rnd,dupsid,sni=www.google.com:repeats=11:tcp_seq=-10000:ip_id=zero:strategy=4
+--payload=known
+--lua-desync=multidisorder:pos=1,midsld:ip_id=zero:strategy=4:final
+
+# =====================================================================
+#  ПРОФИЛЬ 2. Discord TLS 443.  Домен ротации: dc
+#  Отдельный профиль, потому что в list-general.txt доменов Discord нет,
+#  а ipset по умолчанию выключен. Без него веб-Discord падал бы в профиль 0.
+# =====================================================================
+--new=discord-tls
+--filter-tcp=443
+--filter-l7=tls
+--hostlist-domains=discord.com,discordapp.com,discord.gg,discord.media,cdn.discordapp.com
+--hostlist-exclude={ROOT}\lists\list-exclude.txt
+--hostlist-exclude={ROOT}\lists\list-exclude-user.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude-user.txt
+--out-range=-s34228
+--in-range=-s5556
+--lua-desync=circular:key=dc:nld=2:fails=4:time=45:retrans=3:maxseq=32768:inseq=4096
+--in-range=x
+
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tls_mod=rnd,dupsid,sni=www.google.com:repeats=8:tcp_seq=-10000000:strategy=1
+--payload=known
+--lua-desync=multisplit:pos=1:seqovl=681:seqovl_pattern=tls_clienthello_www_google_com:strategy=1
+
+--payload=known
+--lua-desync=hostfakesplit:host=www.google.com:repeats=4:tcp_ts=-1000:strategy=2
+
+--payload=tls_client_hello
+--lua-desync=fake:blob=tls_clienthello_www_google_com:repeats=6:tcp_ts=-1000:strategy=3
+--payload=known
+--lua-desync=fakedsplit:pos=2:pattern=0x00:tcp_ts=-1000:strategy=3
+
+--payload=tls_client_hello
+--lua-desync=fake:blob=0x00000000:repeats=11:tcp_seq=-10000:strategy=4
+--lua-desync=fake:blob=fake_default_tls:tls_mod=rnd,dupsid,sni=www.google.com:repeats=11:tcp_seq=-10000:strategy=4
+--payload=known
+--lua-desync=multidisorder:pos=1,midsld:strategy=4:final
+
+# =====================================================================
+#  ПРОФИЛЬ 3. Общий TLS/HTTP 80,443.  Домен ротации: cm
+#  Для HTTP-пейлоада фейк свой (fake_default_http), tls_mod НЕ применяется.
+# =====================================================================
+--new=common-tls-http
+--filter-tcp=80,443
+--filter-l7=tls,http
+--hostlist={ROOT}\lists\list-general.txt
+--hostlist={ROOT}\lists\list-general-user.txt
+--hostlist-exclude={ROOT}\lists\list-exclude.txt
+--hostlist-exclude={ROOT}\lists\list-exclude-user.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude-user.txt
+--out-range=-s34228
+--in-range=-s5556
+--lua-desync=circular:key=cm:nld=2:fails=4:time=45:retrans=3:maxseq=32768:inseq=4096
+--in-range=x
+
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tls_mod=rnd,dupsid,sni=www.google.com:repeats=8:tcp_seq=-10000000:strategy=1
+--payload=http_req
+--lua-desync=fake:blob=fake_default_http:repeats=8:tcp_seq=-10000000:strategy=1
+--payload=known
+--lua-desync=multisplit:pos=1:seqovl=681:seqovl_pattern=tls_clienthello_www_google_com:strategy=1
+
+--payload=known
+--lua-desync=hostfakesplit:host=www.google.com:repeats=4:tcp_ts=-1000:strategy=2
+
+--payload=tls_client_hello
+--lua-desync=fake:blob=tls_clienthello_www_google_com:repeats=6:tcp_ts=-1000:strategy=3
+--payload=http_req
+--lua-desync=fake:blob=fake_default_http:repeats=6:tcp_ts=-1000:strategy=3
+--payload=known
+--lua-desync=fakedsplit:pos=2:pattern=0x00:tcp_ts=-1000:strategy=3
+
+--payload=tls_client_hello
+--lua-desync=fake:blob=0x00000000:repeats=11:tcp_seq=-10000:strategy=4
+--lua-desync=fake:blob=fake_default_tls:tls_mod=rnd,dupsid,sni=www.google.com:repeats=11:tcp_seq=-10000:strategy=4
+--payload=http_req
+--lua-desync=fake:blob=fake_default_http:repeats=11:tcp_seq=-10000:strategy=4
+--payload=known
+--lua-desync=multidisorder:pos=1,midsld:strategy=4:final
+
+# =====================================================================
+#  ПРОФИЛЬ 4. QUIC / HTTP3.  Домен ротации: qc
+#  Диапазоны "a": режим s — это TCP relative sequence, для UDP не определён.
+#  Объём ограничен сигнатурными фильтрами WinDivert, а не диапазонами.
+#  Пороги UDP: udp_out=3 (была ретрансмиссия Initial), udp_in=1 (сервер молчит).
+# =====================================================================
+--new=quic
+--filter-udp=443
+--filter-l7=quic
+--ipset-exclude={ROOT}\lists\ipset-exclude.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude-user.txt
+--out-range=a
+--in-range=a
+--lua-desync=circular:key=qc:nld=2:fails=3:time=45:udp_out=3:udp_in=1
+--in-range=x
+
+--payload=quic_initial
+--lua-desync=fake:blob=quic_initial_www_google_com:repeats=6:strategy=1
+
+--payload=quic_initial
+--lua-desync=fake:blob=quic_initial_www_google_com:repeats=11:strategy=2
+
+--payload=quic_initial
+--lua-desync=fake:blob=quic_initial_www_google_com:repeats=6:strategy=3
+--lua-desync=send:ipfrag:ipfrag_pos_udp=32:strategy=3
+--lua-desync=drop:strategy=3:final
+
+# =====================================================================
+#  ПРОФИЛЬ 5. Discord media / voice UDP.  БЕЗ ротации (осознанно).
+#  У UDP-медиа нет надёжного сигнала неудачи: детектор считает только
+#  перехваченные пакеты, и слепая ротация там скорее навредит.
+#  Поэтому фиксированная стратегия, repeats=6 — как в 22 пресетах Flowseal.
+# =====================================================================
+--new=discord-udp
+--filter-udp=19294-19344,50000-50100
+--filter-l7=discord,stun
+--ipset-exclude={ROOT}\lists\ipset-exclude.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude-user.txt
+--payload=discord_ip_discovery
+--lua-desync=fake:blob=ACTIVE_DISCORD_UDP:repeats=6
+--payload=stun
+--lua-desync=fake:blob=ACTIVE_DISCORD_UDP:repeats=6
+
+# =====================================================================
+#  ПРОФИЛИ 6-7. Статические fallback-профили по ipset.
+#  Включены ТОЛЬКО при включённом IPSet Filter (--easy-require=ipset),
+#  по умолчанию неактивны: 33048 записей в память не читаются.
+#  Стоят последними, чтобы хостлистовые профили выигрывали по приоритету.
+# =====================================================================
+--new=ipset-tls
+--easy-require=ipset
+--filter-tcp=80,443,8443
+--ipset={ROOT}\lists\ipset-all.txt
+--hostlist-exclude={ROOT}\lists\list-exclude.txt
+--hostlist-exclude={ROOT}\lists\list-exclude-user.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude-user.txt
+--out-range=-d10
+--payload=known
+--lua-desync=multisplit:pos=1:seqovl=568:seqovl_pattern=tls_clienthello_4pda_to
+
+--new=ipset-quic
+--easy-require=ipset
+--filter-udp=443
+--ipset={ROOT}\lists\ipset-all.txt
+--hostlist-exclude={ROOT}\lists\list-exclude.txt
+--hostlist-exclude={ROOT}\lists\list-exclude-user.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude.txt
+--ipset-exclude={ROOT}\lists\ipset-exclude-user.txt
+--payload=quic_initial
+--lua-desync=fake:blob=quic_initial_www_google_com:repeats=6
